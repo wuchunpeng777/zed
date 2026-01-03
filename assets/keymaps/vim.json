@@ -849,6 +849,22 @@
     },
   },
   {
+    "context": "vim_mode == flash",
+    "bindings": {
+      "escape": "vim::ClearOperators",
+      "ctrl-[": "vim::ClearOperators",
+      "ctrl-c": "vim::ClearOperators",
+      "tab": "vim::ClearOperators",
+      "enter": "vim::ClearOperators",
+      "backspace": "vim::ClearOperators",
+      "up": "vim::ClearOperators",
+      "down": "vim::ClearOperators",
+      "left": "vim::ClearOperators",
+      "right": "vim::ClearOperators",
+      "space": "vim::ClearOperators"
+    }
+  },
+  {
     "context": "VimControl && !menu || !Editor && !Terminal",
     "bindings": {
       // window related commands (ctrl-w X)

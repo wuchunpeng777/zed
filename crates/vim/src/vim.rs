@@ -6,6 +6,7 @@ mod test;
 mod change_list;
 mod command;
 mod digraph;
+mod flash;
 mod helix;
 mod indent;
 mod insert;
@@ -120,6 +121,14 @@ struct PushSneak {
 #[serde(deny_unknown_fields)]
 struct PushSneakBackward {
     first_char: Option<char>,
+}
+
+#[derive(Clone, Deserialize, JsonSchema, PartialEq, Action)]
+#[action(namespace = vim)]
+#[serde(deny_unknown_fields)]
+/// Starts flash jump mode for quick navigation.
+struct Flash {
+    backwards: Option<bool>,
 }
 
 #[derive(Clone, Deserialize, JsonSchema, PartialEq, Action)]
@@ -506,6 +515,7 @@ pub(crate) struct Vim {
 
     selected_register: Option<char>,
     pub search: SearchState,
+    pub(crate) flash_state: Option<flash::FlashState>,
 
     editor: WeakEntity<Editor>,
 
@@ -566,6 +576,7 @@ impl Vim {
             status_label: None,
             selected_register: None,
             search: SearchState::default(),
+            flash_state: None,
 
             last_command: None,
             running_command: None,
@@ -723,6 +734,10 @@ impl Vim {
                     window,
                     cx,
                 )
+            });
+
+            Vim::action(editor, cx, |vim, action: &Flash, window, cx| {
+                vim.flash_search(action.backwards.unwrap_or(false), window, cx)
             });
 
             Vim::action(editor, cx, |vim, _: &PushAddSurrounds, window, cx| {
@@ -1379,6 +1394,11 @@ impl Vim {
             }
         }
 
+        if self.is_flash_active() {
+            mode = "flash".to_string();
+            context.add("VimFlash");
+        }
+
         if mode == "normal"
             || mode == "visual"
             || mode == "operator"
@@ -1656,6 +1676,9 @@ impl Vim {
         Vim::take_forced_motion(cx);
         self.selected_register.take();
         self.operator_stack.clear();
+        if self.is_flash_active() {
+            self.clear_flash(window, cx);
+        }
         self.sync_vim_settings(window, cx);
     }
 
@@ -1772,6 +1795,12 @@ impl Vim {
     fn input_ignored(&mut self, text: Arc<str>, window: &mut Window, cx: &mut Context<Self>) {
         if text.is_empty() {
             return;
+        }
+
+        if self.is_flash_active() {
+            if self.flash_input(&text, window, cx) {
+                return;
+            }
         }
 
         match self.active_operator() {

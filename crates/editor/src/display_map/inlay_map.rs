@@ -334,6 +334,7 @@ impl<'a> Iterator for InlayChunks<'a> {
                     }),
                     InlayId::Hint(_) => self.highlight_styles.inlay_hint,
                     InlayId::DebuggerValue(_) => self.highlight_styles.inlay_hint,
+                    InlayId::Flash(_) => self.highlight_styles.flash_label,
                     InlayId::Color(_) => {
                         if let InlayContent::Color(color) = inlay.content {
                             renderer = Some(ChunkRenderer {

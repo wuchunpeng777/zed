@@ -26,7 +26,7 @@ pub use vim_test_context::*;
 use indoc::indoc;
 use search::BufferSearchBar;
 
-use crate::{PushSneak, PushSneakBackward, insert::NormalBefore, motion, state::Mode};
+use crate::{Flash, PushSneak, PushSneakBackward, VimAddon, insert::NormalBefore, motion, state::Mode};
 
 use util_macros::perf;
 
@@ -1620,6 +1620,52 @@ async fn test_sneak(cx: &mut gpui::TestAppContext) {
     cx.assert_state(r#"11 12ˇ 13 14"#, Mode::Normal);
     cx.simulate_keystrokes(";");
     cx.assert_state(r#"11ˇ 12 13 14"#, Mode::Normal);
+}
+
+#[perf]
+#[gpui::test]
+async fn test_flash(cx: &mut gpui::TestAppContext) {
+    let mut cx = VimTestContext::new(cx, true).await;
+
+    cx.update(|_window, cx| {
+        cx.bind_keys([KeyBinding::new(
+            "g s",
+            Flash { backwards: None },
+            Some("vim_mode == normal"),
+        )])
+    });
+
+    cx.set_state(r#"ˇThe fox and fox"#, Mode::Normal);
+
+    cx.simulate_keystrokes("g s f o");
+    cx.cx.cx.run_until_parked();
+
+    let flash_active = cx.update_editor(|editor, _, cx| {
+        editor
+            .addon::<VimAddon>()
+            .map(|vim| vim.entity.read(cx).is_flash_active())
+            .unwrap_or(false)
+    });
+    assert!(
+        flash_active,
+        "Flash mode should be active after entering search pattern"
+    );
+
+    cx.simulate_keystrokes("a");
+    cx.cx.cx.run_until_parked();
+
+    cx.assert_state(r#"The ˇfox and fox"#, Mode::Normal);
+
+    let flash_active = cx.update_editor(|editor, _, cx| {
+        editor
+            .addon::<VimAddon>()
+            .map(|vim| vim.entity.read(cx).is_flash_active())
+            .unwrap_or(false)
+    });
+    assert!(
+        !flash_active,
+        "Flash mode should be deactivated after jumping"
+    );
 }
 
 #[perf]

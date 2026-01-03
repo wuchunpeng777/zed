@@ -104,6 +104,15 @@ impl Inlay {
         }
     }
 
+    /// Create a flash jump label inlay for vim Flash mode
+    pub fn flash<T: Into<Rope>>(id: usize, position: Anchor, text: T) -> Self {
+        Self {
+            id: InlayId::Flash(id),
+            position,
+            content: InlayContent::Text(text.into()),
+        }
+    }
+
     pub fn text(&self) -> &Rope {
         static COLOR_TEXT: OnceLock<Rope> = OnceLock::new();
         match &self.content {
