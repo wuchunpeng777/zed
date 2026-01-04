@@ -1092,14 +1092,11 @@ impl DisplaySnapshot {
                 inlay_hint: Some(editor_style.inlay_hints_style),
                 edit_prediction: Some(editor_style.edit_prediction_styles),
                 flash_label: Some({
-                    // Use keyword color from syntax theme for maximum visibility
-                    let mut style = editor_style.syntax.get("keyword");
-                    // Ensure we have a bold font and a contrasting background
+                    let mut style = HighlightStyle::default();
+                    // Use black text on cursor-colored background for maximum visibility
+                    style.color = Some(gpui::black());
                     style.font_weight = Some(gpui::FontWeight::BOLD);
-                    if style.background_color.is_none() {
-                        // Use a subtle background if the keyword style doesn't have one
-                        style.background_color = Some(editor_style.status.hint_background);
-                    }
+                    style.background_color = Some(editor_style.local_player.cursor);
                     style
                 }),
             },

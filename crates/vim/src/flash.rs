@@ -9,12 +9,13 @@ use crate::Vim;
 use editor::{
     display_map::{DisplayRow, DisplaySnapshot, ToDisplayPoint},
     inlays::Inlay,
-    Anchor, DisplayPoint, SelectionEffects, ToOffset, ToPoint,
+    Anchor, DisplayPoint, Editor, SelectionEffects, ToOffset, ToPoint,
 };
-use gpui::{Context, Window};
+use gpui::{Context, Entity, WeakEntity, Window};
 use language::{Point, SelectionGoal};
 use project::InlayId;
 use std::ops::Range;
+use workspace::Pane;
 
 /// Labels for flash jumps - prioritizing home row keys for easy typing
 /// These will be filtered dynamically to exclude characters in the search pattern
@@ -33,6 +34,10 @@ pub struct FlashMatch {
     /// Jump label (can be 1 or more characters)
     pub label: String,
     pub anchor: Option<Anchor>,
+    /// The editor this match belongs to (None means current editor)
+    pub editor: Option<WeakEntity<Editor>>,
+    /// The pane containing this editor (for activation)
+    pub pane: Option<WeakEntity<Pane>>,
 }
 
 #[derive(Clone, Debug, Default)]
@@ -42,6 +47,8 @@ pub struct FlashState {
     pub matches: Vec<FlashMatch>,
     pub backwards: bool,
     pub inlay_ids: Vec<InlayId>,
+    /// Inlay IDs per editor (for multi-pane support)
+    pub editor_inlay_ids: Vec<(WeakEntity<Editor>, Vec<InlayId>)>,
     /// Buffer for multi-character label input
     pub label_input: String,
 }
@@ -54,6 +61,7 @@ impl FlashState {
             matches: Vec::new(),
             backwards,
             inlay_ids: Vec::new(),
+            editor_inlay_ids: Vec::new(),
             label_input: String::new(),
         }
     }
@@ -147,9 +155,49 @@ impl Vim {
         }
 
         let backwards = flash_state.backwards;
-        // Get old inlay IDs to remove before creating new ones
+        
+        // Get old inlay IDs to remove from all editors
         let old_inlay_ids = flash_state.inlay_ids.clone();
+        let old_editor_inlay_ids = flash_state.editor_inlay_ids.clone();
 
+        // Clear old inlays from other editors first
+        for (weak_editor, inlay_ids) in old_editor_inlay_ids {
+            if let Some(editor) = weak_editor.upgrade() {
+                editor.update(cx, |editor, cx| {
+                    editor.splice_inlays(&inlay_ids, vec![], cx);
+                    editor.clear_background_highlights::<FlashHighlight>(cx);
+                });
+            }
+        }
+
+        // Collect all editors from workspace panes
+        let workspace = self.workspace(window);
+        let mut all_editors: Vec<(Entity<Editor>, Option<WeakEntity<Pane>>)> = Vec::new();
+        
+        if let Some(workspace) = workspace {
+            let workspace_read = workspace.read(cx);
+            for pane in workspace_read.panes() {
+                let pane_weak = pane.downgrade();
+                for item in pane.read(cx).items() {
+                    if let Some(editor) = item.downcast::<Editor>() {
+                        all_editors.push((editor, Some(pane_weak.clone())));
+                    }
+                }
+            }
+        }
+
+        // First, collect all matches from all visible editors
+        struct EditorMatches {
+            editor: WeakEntity<Editor>,
+            pane: Option<WeakEntity<Pane>>,
+            matches: Vec<MatchResult>,
+            display_snapshot: DisplaySnapshot,
+        }
+        
+        let mut all_editor_matches: Vec<EditorMatches> = Vec::new();
+        let pattern_byte_len = search_pattern.len() as u32;
+        
+        // Process current editor first
         self.update_editor(cx, |vim, editor, cx| {
             // Remove old inlays first
             if !old_inlay_ids.is_empty() {
@@ -167,8 +215,7 @@ impl Vim {
                 .head()
                 .to_display_point(&display_snapshot);
 
-            // Search a reasonable range around cursor (about 100 lines in each direction)
-            // This is much faster than searching the entire document
+            // Search visible range in current editor
             let search_range_lines = 100u32;
             let max_row = display_snapshot.max_point().row();
 
@@ -181,47 +228,84 @@ impl Vim {
                 display_snapshot.line_len(DisplayRow(end_row)),
             );
 
-            // Find matches with case-insensitive multi-character search
-            let mut matches = find_all_matches_multi_char(
+            let matches = find_all_matches_multi_char(
                 &display_snapshot,
                 start_point,
                 end_point,
                 &search_pattern,
             );
 
-            if backwards {
-                matches.reverse();
+            if let Some(state) = vim.flash_state.as_mut() {
+                state.inlay_ids.clear();
+                state.editor_inlay_ids.clear();
             }
+            
+            all_editor_matches.push(EditorMatches {
+                editor: cx.entity().downgrade(),
+                pane: None,
+                matches,
+                display_snapshot,
+            });
+        });
 
-            let buffer_snapshot = display_snapshot.buffer_snapshot();
+        // Process other editors in split panes
+        let current_editor_id = self.editor().map(|e| e.entity_id());
+        for (editor, pane) in all_editors {
+            if Some(editor.entity_id()) == current_editor_id {
+                continue;
+            }
             
-            // flash.nvim style: exclude characters that would continue the search
-            // For each match, get the character immediately following it
-            // These chars would conflict with labels (typing them continues search)
-            let mut skip_chars: std::collections::HashSet<char> = std::collections::HashSet::new();
+            editor.update(cx, |editor, cx| {
+                let snapshot = editor.snapshot(window, cx);
+                let display_snapshot = snapshot.display_snapshot.clone();
+                let max_row = display_snapshot.max_point().row();
+
+                let start_point = DisplayPoint::new(DisplayRow(0), 0);
+                let end_point = DisplayPoint::new(
+                    max_row,
+                    display_snapshot.line_len(max_row),
+                );
+
+                let matches = find_all_matches_multi_char(
+                    &display_snapshot,
+                    start_point,
+                    end_point,
+                    &search_pattern,
+                );
+                
+                if !matches.is_empty() {
+                    all_editor_matches.push(EditorMatches {
+                        editor: cx.entity().downgrade(),
+                        pane,
+                        matches,
+                        display_snapshot,
+                    });
+                }
+            });
+        }
+
+        // Collect all matches and build skip chars
+        let mut all_matches: Vec<(MatchResult, WeakEntity<Editor>, Option<WeakEntity<Pane>>, DisplaySnapshot)> = Vec::new();
+        let mut skip_chars: std::collections::HashSet<char> = std::collections::HashSet::new();
+
+        for editor_match in &all_editor_matches {
+            let buffer_snapshot = editor_match.display_snapshot.buffer_snapshot();
             
-            for match_result in &matches {
-                // Use buffer_point directly - no DisplayPoint conversion needed
+            for match_result in &editor_match.matches {
                 let match_point = match_result.buffer_point;
                 let line_len = buffer_snapshot.line_len(multi_buffer::MultiBufferRow(match_point.row));
-                
-                // Calculate byte position after the pattern
                 let after_col = match_point.column + match_result.pattern_byte_len;
                 
-                // Only proceed if we're still within the line
                 if after_col < line_len {
-                    // Get the text after the match to find the next character
                     let line_start = Point::new(match_point.row, 0);
                     let line_start_offset = line_start.to_offset(&buffer_snapshot);
                     let line_end = Point::new(match_point.row, line_len);
                     let line_end_offset = line_end.to_offset(&buffer_snapshot);
                     
-                    // Get the whole line text and find char after match by character iteration
                     let line_text: String = buffer_snapshot
                         .text_for_range(line_start_offset..line_end_offset)
                         .collect();
                     
-                    // Find the character at the byte position after the match
                     let mut byte_count: u32 = 0;
                     for c in line_text.chars() {
                         if byte_count == after_col {
@@ -230,80 +314,130 @@ impl Vim {
                         }
                         byte_count += c.len_utf8() as u32;
                         if byte_count > after_col {
-                            // We're inside a multi-byte character - skip
                             break;
                         }
                     }
                 }
             }
-            
-            // Filter labels: exclude chars that would continue a match
-            let mut label_chars: Vec<char> = FLASH_LABELS
-                .chars()
-                .filter(|c| !skip_chars.contains(&c.to_ascii_lowercase()))
-                .collect();
-            
-            // If no labels available after filtering, use all labels as fallback
-            if label_chars.is_empty() {
-                label_chars = FLASH_LABELS.chars().collect();
+        }
+
+        for editor_match in all_editor_matches {
+            for match_result in editor_match.matches {
+                all_matches.push((
+                    match_result,
+                    editor_match.editor.clone(),
+                    editor_match.pane.clone(),
+                    editor_match.display_snapshot.clone(),
+                ));
             }
-            
-            // Generate labels: single chars first, then 2-char combinations
-            let labels = generate_labels(&label_chars, matches.len());
-            
-            let flash_matches: Vec<FlashMatch> = matches
-                .into_iter()
-                .enumerate()
-                .map(|(i, match_result)| {
-                    let anchor = buffer_snapshot.anchor_before(match_result.buffer_point);
-                    FlashMatch {
-                        buffer_point: match_result.buffer_point,
-                        display_point: match_result.display_point,
-                        label: labels[i].clone(),
-                        anchor: Some(anchor),
-                    }
-                })
-                .collect();
+        }
 
-            let flash_state = vim.flash_state.as_mut().expect("flash state should exist");
-            let pattern_byte_len = search_pattern.len() as u32;
-            flash_state.matches = flash_matches.clone();
+        if backwards {
+            all_matches.reverse();
+        }
 
-            // Create highlight ranges for background using buffer points
-            let ranges: Vec<Range<Anchor>> = flash_matches
-                .iter()
-                .map(|m| {
-                    let start_point = m.buffer_point;
-                    // Use byte length for column offset since Point.column is in bytes
-                    let end_point = Point::new(start_point.row, start_point.column + pattern_byte_len);
-                    let start = buffer_snapshot.anchor_before(start_point);
-                    let end = buffer_snapshot.anchor_after(end_point);
-                    start..end
-                })
-                .collect();
+        // Filter labels
+        let mut label_chars: Vec<char> = FLASH_LABELS
+            .chars()
+            .filter(|c| !skip_chars.contains(&c.to_ascii_lowercase()))
+            .collect();
+        
+        if label_chars.is_empty() {
+            label_chars = FLASH_LABELS.chars().collect();
+        }
+        
+        let labels = generate_labels(&label_chars, all_matches.len());
+        
+        // Create flash matches with editor references
+        let flash_matches: Vec<FlashMatch> = all_matches
+            .iter()
+            .enumerate()
+            .map(|(i, (match_result, editor, pane, display_snapshot))| {
+                let buffer_snapshot = display_snapshot.buffer_snapshot();
+                let anchor = buffer_snapshot.anchor_before(match_result.buffer_point);
+                FlashMatch {
+                    buffer_point: match_result.buffer_point,
+                    display_point: match_result.display_point,
+                    label: labels[i].clone(),
+                    anchor: Some(anchor),
+                    editor: Some(editor.clone()),
+                    pane: pane.clone(),
+                }
+            })
+            .collect();
 
-            editor.highlight_background::<FlashHighlight>(
-                &ranges,
-                |_, colors| colors.colors().editor_document_highlight_write_background,
-                cx,
-            );
+        // Group matches by editor and create inlays/highlights
+        let mut editor_inlay_ids: Vec<(WeakEntity<Editor>, Vec<InlayId>)> = Vec::new();
+        let mut inlay_counter = 0usize;
 
-            // Create inlays for labels
-            let inlays: Vec<Inlay> = flash_matches
-                .iter()
-                .enumerate()
-                .filter_map(|(i, m)| {
-                    m.anchor.map(|anchor| {
-                        Inlay::flash(i, anchor, format!("[{}]", m.label))
-                    })
-                })
-                .collect();
+        // Group matches by editor entity id along with their snapshots
+        let mut matches_by_editor: std::collections::HashMap<gpui::EntityId, (WeakEntity<Editor>, DisplaySnapshot, Vec<&FlashMatch>)> = 
+            std::collections::HashMap::new();
+        
+        for (i, flash_match) in flash_matches.iter().enumerate() {
+            if let Some(ref editor) = flash_match.editor {
+                if let Some(editor_entity) = editor.upgrade() {
+                    let editor_id = editor_entity.entity_id();
+                    let entry = matches_by_editor
+                        .entry(editor_id)
+                        .or_insert_with(|| {
+                            let (_, _, _, ds) = &all_matches[i];
+                            (editor.clone(), ds.clone(), Vec::new())
+                        });
+                    entry.2.push(flash_match);
+                }
+            }
+        }
 
-            let inlay_ids: Vec<InlayId> = inlays.iter().map(|inlay| inlay.id).collect();
-            flash_state.inlay_ids = inlay_ids;
-            
-            editor.splice_inlays(&[], inlays, cx);
-        });
+        // Apply highlights and inlays to each editor
+        for (_editor_id, (editor_weak, display_snapshot, matches)) in matches_by_editor {
+            if let Some(editor) = editor_weak.upgrade() {
+                editor.update(cx, |editor, cx| {
+                    let buffer_snapshot = display_snapshot.buffer_snapshot();
+                    
+                    // Create highlight ranges
+                    let ranges: Vec<Range<Anchor>> = matches
+                        .iter()
+                        .map(|m| {
+                            let start_point = m.buffer_point;
+                            let end_point = Point::new(start_point.row, start_point.column + pattern_byte_len);
+                            let start = buffer_snapshot.anchor_before(start_point);
+                            let end = buffer_snapshot.anchor_after(end_point);
+                            start..end
+                        })
+                        .collect();
+
+                    editor.highlight_background::<FlashHighlight>(
+                        &ranges,
+                        |_, colors| colors.colors().editor_document_highlight_write_background,
+                        cx,
+                    );
+
+                    // Create inlays
+                    let inlays: Vec<Inlay> = matches
+                        .iter()
+                        .filter_map(|m| {
+                            m.anchor.map(|anchor| {
+                                let inlay = Inlay::flash(inlay_counter, anchor, format!("[{}]", m.label));
+                                inlay_counter += 1;
+                                inlay
+                            })
+                        })
+                        .collect();
+
+                    let inlay_ids: Vec<InlayId> = inlays.iter().map(|inlay| inlay.id).collect();
+                    editor_inlay_ids.push((editor_weak.clone(), inlay_ids));
+                    
+                    editor.splice_inlays(&[], inlays, cx);
+                });
+            }
+        }
+
+        // Update flash state
+        if let Some(flash_state) = &mut self.flash_state {
+            flash_state.matches = flash_matches;
+            flash_state.editor_inlay_ids = editor_inlay_ids;
+        }
 
         self.show_flash_labels(window, cx);
     }
@@ -319,25 +453,79 @@ impl Vim {
         window: &mut Window,
         cx: &mut Context<Self>,
     ) {
-        // Use anchor-based position to avoid offset issues when inlays are removed
-        // The anchor is buffer-relative and won't shift when inlays disappear
         let anchor = flash_match.anchor.clone();
-        
-        self.update_editor(cx, |vim, editor, cx| {
-            // First, remove inlays to get accurate display positions
-            let inlay_ids: Vec<InlayId> = vim
-                .flash_state
-                .as_ref()
-                .map(|s| s.inlay_ids.clone())
-                .unwrap_or_default();
-            if !inlay_ids.is_empty() {
-                editor.splice_inlays(&inlay_ids, Vec::new(), cx);
+        let target_editor = flash_match.editor.clone();
+        let target_pane = flash_match.pane.clone();
+        let is_visual = self.mode.is_visual();
+
+        // Clear all inlays from all editors first
+        if let Some(flash_state) = &self.flash_state {
+            for (weak_editor, inlay_ids) in &flash_state.editor_inlay_ids {
+                if let Some(editor) = weak_editor.upgrade() {
+                    editor.update(cx, |editor, cx| {
+                        editor.splice_inlays(inlay_ids, Vec::new(), cx);
+                    });
+                }
             }
-            if let Some(state) = vim.flash_state.as_mut() {
-                state.inlay_ids.clear();
+        }
+
+        if let Some(state) = self.flash_state.as_mut() {
+            state.inlay_ids.clear();
+            state.editor_inlay_ids.clear();
+        }
+
+        // If jumping to another editor, activate its pane and item first
+        if let Some(ref target_editor_weak) = target_editor {
+            if let Some(target_editor) = target_editor_weak.upgrade() {
+                let current_editor_id = self.editor().map(|e| e.entity_id());
+                
+                if Some(target_editor.entity_id()) != current_editor_id {
+                    // Activate the pane containing the target editor
+                    if let Some(ref pane_weak) = target_pane {
+                        if let Some(pane) = pane_weak.upgrade() {
+                            let target_id = target_editor.entity_id();
+                            let item_index = pane.read(cx).items().position(|item| {
+                                item.downcast::<Editor>()
+                                    .map(|e| e.entity_id() == target_id)
+                                    .unwrap_or(false)
+                            });
+                            if let Some(index) = item_index {
+                                pane.update(cx, |pane, cx| {
+                                    pane.activate_item(index, true, true, window, cx);
+                                });
+                            }
+                        }
+                    }
+
+                    // Jump in the target editor directly
+                    target_editor.update(cx, |editor, cx| {
+                        let snapshot = editor.snapshot(window, cx);
+                        let display_snapshot = &snapshot.display_snapshot;
+                        
+                        let point = if let Some(ref anchor) = anchor {
+                            let buffer_point = anchor.to_point(&display_snapshot.buffer_snapshot());
+                            buffer_point.to_display_point(display_snapshot)
+                        } else {
+                            flash_match.display_point
+                        };
+
+                        editor.change_selections(SelectionEffects::no_scroll(), window, cx, |s| {
+                            s.move_with(|_, selection| {
+                                if is_visual {
+                                    selection.set_head(point, SelectionGoal::None);
+                                } else {
+                                    selection.collapse_to(point, SelectionGoal::None);
+                                }
+                            });
+                        });
+                    });
+                    return;
+                }
             }
-            
-            // Now calculate the correct display point from the anchor
+        }
+
+        // Jump in current editor
+        self.update_editor(cx, |_, editor, cx| {
             let snapshot = editor.snapshot(window, cx);
             let display_snapshot = &snapshot.display_snapshot;
             
@@ -350,7 +538,7 @@ impl Vim {
 
             editor.change_selections(SelectionEffects::no_scroll(), window, cx, |s| {
                 s.move_with(|_, selection| {
-                    if vim.mode.is_visual() {
+                    if is_visual {
                         selection.set_head(point, SelectionGoal::None);
                     } else {
                         selection.collapse_to(point, SelectionGoal::None);
@@ -367,12 +555,30 @@ impl Vim {
             .as_ref()
             .map(|s| s.inlay_ids.clone())
             .unwrap_or_default();
+        let editor_inlay_ids: Vec<(WeakEntity<Editor>, Vec<InlayId>)> = self
+            .flash_state
+            .as_ref()
+            .map(|s| s.editor_inlay_ids.clone())
+            .unwrap_or_default();
 
         self.flash_state = None;
         self.status_label = None;
+        
+        // Clear inlays from all editors
+        for (weak_editor, inlay_ids) in editor_inlay_ids {
+            if let Some(editor) = weak_editor.upgrade() {
+                editor.update(cx, |editor, cx| {
+                    editor.clear_background_highlights::<FlashHighlight>(cx);
+                    if !inlay_ids.is_empty() {
+                        editor.splice_inlays(&inlay_ids, vec![], cx);
+                    }
+                });
+            }
+        }
+        
+        // Also clear from current editor
         self.update_editor(cx, |_, editor, cx| {
             editor.clear_background_highlights::<FlashHighlight>(cx);
-            // Remove flash inlays
             if !inlay_ids.is_empty() {
                 editor.splice_inlays(&inlay_ids, vec![], cx);
             }
