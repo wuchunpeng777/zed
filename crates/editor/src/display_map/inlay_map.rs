@@ -334,7 +334,68 @@ impl<'a> Iterator for InlayChunks<'a> {
                     }),
                     InlayId::Hint(_) => self.highlight_styles.inlay_hint,
                     InlayId::DebuggerValue(_) => self.highlight_styles.inlay_hint,
-                    InlayId::Flash(_) => self.highlight_styles.flash_label,
+                    InlayId::Flash(_) => {
+                        // Create custom renderer for flash labels with prefix highlighting
+                        if let InlayContent::Flash { label, prefix_len, .. } = &inlay.content {
+                            let label = label.clone();
+                            let prefix_len = *prefix_len;
+                            renderer = Some(ChunkRenderer {
+                                id: ChunkRendererId::Inlay(inlay.id),
+                                render: Arc::new(move |cx| {
+                                    use gpui::{div, px, FontWeight, Styled};
+                                    use ui::{h_flex, prelude::*};
+                                    
+                                    let theme = cx.theme();
+                                    let cursor_color = theme.players().local().cursor;
+                                    // Determine text color based on cursor brightness
+                                    let text_color = if cursor_color.l > 0.5 {
+                                        gpui::black()
+                                    } else {
+                                        gpui::white()
+                                    };
+                                    // Dimmed color for already-typed prefix
+                                    let dimmed_color = text_color.opacity(0.4);
+                                    
+                                    let prefix: String = label.chars().take(prefix_len).collect();
+                                    let suffix: String = label.chars().skip(prefix_len).collect();
+                                    
+                                    h_flex()
+                                        .bg(cursor_color)
+                                        .rounded_sm()
+                                        .px(px(2.0))
+                                        .font_weight(FontWeight::BOLD)
+                                        .child(
+                                            div()
+                                                .text_color(dimmed_color)
+                                                .child("[")
+                                        )
+                                        .when(!prefix.is_empty(), |el| {
+                                            el.child(
+                                                div()
+                                                    .text_color(dimmed_color)
+                                                    .child(prefix.clone())
+                                            )
+                                        })
+                                        .when(!suffix.is_empty(), |el| {
+                                            el.child(
+                                                div()
+                                                    .text_color(text_color)
+                                                    .child(suffix.clone())
+                                            )
+                                        })
+                                        .child(
+                                            div()
+                                                .text_color(if prefix_len > 0 { dimmed_color } else { text_color })
+                                                .child("]")
+                                        )
+                                        .into_any_element()
+                                }),
+                                constrain_width: false,
+                                measured_width: None,
+                            });
+                        }
+                        self.highlight_styles.flash_label
+                    }
                     InlayId::Color(_) => {
                         if let InlayContent::Color(color) = inlay.content {
                             renderer = Some(ChunkRenderer {

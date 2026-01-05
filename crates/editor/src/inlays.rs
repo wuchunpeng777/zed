@@ -53,6 +53,15 @@ pub struct Inlay {
 pub enum InlayContent {
     Text(text::Rope),
     Color(Hsla),
+    /// Flash jump label with prefix highlighting support
+    Flash {
+        /// The formatted label text for display (e.g., "[ab]")
+        text: text::Rope,
+        /// The full label text (e.g., "ab")
+        label: String,
+        /// Number of characters already typed (to be shown dimmed)
+        prefix_len: usize,
+    },
 }
 
 impl Inlay {
@@ -105,11 +114,14 @@ impl Inlay {
     }
 
     /// Create a flash jump label inlay for vim Flash mode
-    pub fn flash<T: Into<Rope>>(id: usize, position: Anchor, text: T) -> Self {
+    /// `label` is the jump label (e.g., "a" or "ab")
+    /// `prefix_len` is the number of characters already typed (to be shown dimmed)
+    pub fn flash(id: usize, position: Anchor, label: String, prefix_len: usize) -> Self {
+        let text = Rope::from(format!("[{}]", label));
         Self {
             id: InlayId::Flash(id),
             position,
-            content: InlayContent::Text(text.into()),
+            content: InlayContent::Flash { text, label, prefix_len },
         }
     }
 
@@ -118,6 +130,7 @@ impl Inlay {
         match &self.content {
             InlayContent::Text(text) => text,
             InlayContent::Color(_) => COLOR_TEXT.get_or_init(|| Rope::from("◼")),
+            InlayContent::Flash { text, .. } => text,
         }
     }
 

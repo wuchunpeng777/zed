@@ -125,6 +125,8 @@ impl Vim {
             if flash_state.has_label_prefix(&test_label) {
                 // Store the partial label input and wait for more
                 flash_state.label_input = test_label;
+                // Refresh inlays to show the typed prefix as dimmed
+                self.refresh_flash_inlays(window, cx);
                 self.sync_vim_settings(window, cx);
                 return true;
             }
@@ -369,6 +371,8 @@ impl Vim {
         // Group matches by editor and create inlays/highlights
         let mut editor_inlay_ids: Vec<(WeakEntity<Editor>, Vec<InlayId>)> = Vec::new();
         let mut inlay_counter = 0usize;
+        // Get label input length for prefix highlighting (0 during initial match display)
+        let label_input_len = self.flash_state.as_ref().map(|s| s.label_input.len()).unwrap_or(0);
 
         // Group matches by editor entity id along with their snapshots
         let mut matches_by_editor: std::collections::HashMap<gpui::EntityId, (WeakEntity<Editor>, DisplaySnapshot, Vec<&FlashMatch>)> = 
@@ -413,12 +417,12 @@ impl Vim {
                         cx,
                     );
 
-                    // Create inlays
+                    // Create inlays with prefix highlighting support
                     let inlays: Vec<Inlay> = matches
                         .iter()
                         .filter_map(|m| {
                             m.anchor.map(|anchor| {
-                                let inlay = Inlay::flash(inlay_counter, anchor, format!("[{}]", m.label));
+                                let inlay = Inlay::flash(inlay_counter, anchor, m.label.clone(), label_input_len);
                                 inlay_counter += 1;
                                 inlay
                             })
@@ -444,6 +448,67 @@ impl Vim {
 
     fn show_flash_labels(&mut self, _window: &mut Window, cx: &mut Context<Self>) {
         // Labels are shown inline via inlays, no need for status bar display
+        cx.notify();
+    }
+
+    /// Refresh flash inlays to update prefix highlighting when user types partial labels
+    fn refresh_flash_inlays(&mut self, _window: &mut Window, cx: &mut Context<Self>) {
+        let Some(flash_state) = &self.flash_state else {
+            return;
+        };
+
+        let label_input_len = flash_state.label_input.len();
+        let matches = flash_state.matches.clone();
+        let old_editor_inlay_ids = flash_state.editor_inlay_ids.clone();
+
+        // Remove old inlays and create new ones with updated prefix_len
+        let mut new_editor_inlay_ids: Vec<(WeakEntity<Editor>, Vec<InlayId>)> = Vec::new();
+        let mut inlay_counter = 0usize;
+
+        for (editor_weak, old_inlay_ids) in old_editor_inlay_ids {
+            if let Some(editor) = editor_weak.upgrade() {
+                // Get matches for this editor
+                let editor_id = editor.entity_id();
+                let editor_matches: Vec<&FlashMatch> = matches
+                    .iter()
+                    .filter(|m| {
+                        m.editor
+                            .as_ref()
+                            .and_then(|e| e.upgrade())
+                            .map(|e| e.entity_id() == editor_id)
+                            .unwrap_or(false)
+                    })
+                    .collect();
+
+                editor.update(cx, |editor, cx| {
+                    // Remove old inlays
+                    editor.splice_inlays(&old_inlay_ids, vec![], cx);
+
+                    // Create new inlays with updated prefix_len
+                    let inlays: Vec<Inlay> = editor_matches
+                        .iter()
+                        .filter_map(|m| {
+                            m.anchor.map(|anchor| {
+                                let inlay = Inlay::flash(inlay_counter, anchor, m.label.clone(), label_input_len);
+                                inlay_counter += 1;
+                                inlay
+                            })
+                        })
+                        .collect();
+
+                    let inlay_ids: Vec<InlayId> = inlays.iter().map(|inlay| inlay.id).collect();
+                    new_editor_inlay_ids.push((editor_weak.clone(), inlay_ids));
+
+                    editor.splice_inlays(&[], inlays, cx);
+                });
+            }
+        }
+
+        // Update flash state with new inlay IDs
+        if let Some(flash_state) = &mut self.flash_state {
+            flash_state.editor_inlay_ids = new_editor_inlay_ids;
+        }
+
         cx.notify();
     }
 
