@@ -551,6 +551,8 @@ pub struct EditorStyle {
     pub edit_prediction_styles: EditPredictionStyles,
     pub unnecessary_code_fade: f32,
     pub show_underlines: bool,
+    /// Whether the current theme is light (for flash label color adaptation)
+    pub is_light_theme: bool,
 }
 
 impl Default for EditorStyle {
@@ -573,6 +575,7 @@ impl Default for EditorStyle {
             },
             unnecessary_code_fade: Default::default(),
             show_underlines: true,
+            is_light_theme: false,
         }
     }
 }
@@ -18215,6 +18218,7 @@ impl Editor {
                                                 edit_prediction_styles: make_suggestion_styles(
                                                     cx.app,
                                                 ),
+                                                is_light_theme: cx.theme().appearance().is_light(),
                                                 ..EditorStyle::default()
                                             },
                                         ))
@@ -23323,6 +23327,7 @@ impl Editor {
             edit_prediction_styles: make_suggestion_styles(cx),
             unnecessary_code_fade: settings.unnecessary_code_fade,
             show_underlines: self.diagnostics_enabled(),
+            is_light_theme: cx.theme().appearance().is_light(),
         }
     }
     fn breadcrumbs_inner(&self, variant: &Theme, cx: &App) -> Option<Vec<BreadcrumbText>> {
@@ -26453,6 +26458,7 @@ impl BreakpointPromptEditor {
                 background: cx.theme().colors().editor_background,
                 local_player: cx.theme().players().local(),
                 text: text_style,
+                is_light_theme: cx.theme().appearance().is_light(),
                 ..Default::default()
             },
         )

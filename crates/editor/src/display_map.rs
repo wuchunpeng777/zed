@@ -1093,10 +1093,18 @@ impl DisplaySnapshot {
                 edit_prediction: Some(editor_style.edit_prediction_styles),
                 flash_label: Some({
                     let mut style = HighlightStyle::default();
-                    // Use black text on cursor-colored background for maximum visibility
-                    style.color = Some(gpui::black());
+                    // Adapt text color based on cursor color lightness for maximum visibility
+                    // Similar to flash.nvim: use contrasting colors that work well on both themes
+                    let cursor_color = editor_style.local_player.cursor;
+                    // Use the lightness (l) from HSLA to determine if we need light or dark text
+                    // If cursor color lightness > 0.5, use dark text; otherwise use light text
+                    style.color = Some(if cursor_color.l > 0.5 {
+                        gpui::black()
+                    } else {
+                        gpui::white()
+                    });
                     style.font_weight = Some(gpui::FontWeight::BOLD);
-                    style.background_color = Some(editor_style.local_player.cursor);
+                    style.background_color = Some(cursor_color);
                     style
                 }),
             },
