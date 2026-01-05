@@ -351,9 +351,11 @@ impl Vim {
         let labels = generate_labels(&label_chars, all_matches.len());
         
         // Create flash matches with editor references
+        // Only create matches for which we have labels (safety check)
         let flash_matches: Vec<FlashMatch> = all_matches
             .iter()
             .enumerate()
+            .take(labels.len()) // Ensure we don't exceed available labels
             .map(|(i, (match_result, editor, pane, display_snapshot))| {
                 let buffer_snapshot = display_snapshot.buffer_snapshot();
                 let anchor = buffer_snapshot.anchor_before(match_result.buffer_point);
@@ -659,7 +661,12 @@ impl Vim {
 /// Generate unique labels for matches.
 /// Ensures no label is a prefix of another label.
 /// If we have enough single chars, use them. Otherwise, use only 2-char labels.
+/// If still not enough, use 3-char labels.
 fn generate_labels(chars: &[char], count: usize) -> Vec<String> {
+    if chars.is_empty() || count == 0 {
+        return Vec::new();
+    }
+    
     let mut labels = Vec::with_capacity(count);
     
     // If we can fit all matches with single character labels, use them
@@ -667,7 +674,7 @@ fn generate_labels(chars: &[char], count: usize) -> Vec<String> {
         for &c in chars.iter().take(count) {
             labels.push(c.to_string());
         }
-    } else {
+    } else if count <= chars.len() * chars.len() {
         // Need more labels than single chars available
         // Use only 2-character combinations to avoid prefix conflicts
         'outer: for &c1 in chars {
@@ -676,6 +683,18 @@ fn generate_labels(chars: &[char], count: usize) -> Vec<String> {
                     break 'outer;
                 }
                 labels.push(format!("{}{}", c1, c2));
+            }
+        }
+    } else {
+        // Need even more labels - use 3-character combinations
+        'outer: for &c1 in chars {
+            for &c2 in chars {
+                for &c3 in chars {
+                    if labels.len() >= count {
+                        break 'outer;
+                    }
+                    labels.push(format!("{}{}{}", c1, c2, c3));
+                }
             }
         }
     }
