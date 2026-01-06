@@ -210,19 +210,14 @@ impl Vim {
             let snapshot = editor.snapshot(window, cx);
             let display_snapshot = snapshot.display_snapshot.clone();
 
-            // Get cursor position for context-aware searching
-            let cursor_point = editor
-                .selections
-                .newest::<Point>(&display_snapshot)
-                .head()
-                .to_display_point(&display_snapshot);
-
-            // Search visible range in current editor
-            let search_range_lines = 100u32;
+            // Get visible screen range using scroll position and visible line count
+            let scroll_position = editor.scroll_position(cx);
+            let visible_line_count = editor.visible_line_count().unwrap_or(50.0);
             let max_row = display_snapshot.max_point().row();
 
-            let start_row = cursor_point.row().0.saturating_sub(search_range_lines);
-            let end_row = (cursor_point.row().0 + search_range_lines).min(max_row.0);
+            // Calculate visible row range
+            let start_row = (scroll_position.y as u32).min(max_row.0);
+            let end_row = ((scroll_position.y + visible_line_count).ceil() as u32).min(max_row.0);
 
             let start_point = DisplayPoint::new(DisplayRow(start_row), 0);
             let end_point = DisplayPoint::new(
@@ -250,7 +245,7 @@ impl Vim {
             });
         });
 
-        // Process other editors in split panes
+        // Process other editors in split panes - only visible screen content
         let current_editor_id = self.editor().map(|e| e.entity_id());
         for (editor, pane) in all_editors {
             if Some(editor.entity_id()) == current_editor_id {
@@ -260,12 +255,19 @@ impl Vim {
             editor.update(cx, |editor, cx| {
                 let snapshot = editor.snapshot(window, cx);
                 let display_snapshot = snapshot.display_snapshot.clone();
+                
+                // Get visible screen range for this editor
+                let scroll_position = editor.scroll_position(cx);
+                let visible_line_count = editor.visible_line_count().unwrap_or(50.0);
                 let max_row = display_snapshot.max_point().row();
 
-                let start_point = DisplayPoint::new(DisplayRow(0), 0);
+                let start_row = (scroll_position.y as u32).min(max_row.0);
+                let end_row = ((scroll_position.y + visible_line_count).ceil() as u32).min(max_row.0);
+
+                let start_point = DisplayPoint::new(DisplayRow(start_row), 0);
                 let end_point = DisplayPoint::new(
-                    max_row,
-                    display_snapshot.line_len(max_row),
+                    DisplayRow(end_row),
+                    display_snapshot.line_len(DisplayRow(end_row)),
                 );
 
                 let matches = find_all_matches_multi_char(
