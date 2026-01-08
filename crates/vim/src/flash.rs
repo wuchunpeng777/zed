@@ -172,7 +172,7 @@ impl Vim {
             }
         }
 
-        // Collect all editors from workspace panes
+        // Collect only active/visible editors from workspace panes (not all tabs)
         let workspace = self.workspace(window);
         let mut all_editors: Vec<(Entity<Editor>, Option<WeakEntity<Pane>>)> = Vec::new();
         
@@ -180,8 +180,9 @@ impl Vim {
             let workspace_read = workspace.read(cx);
             for pane in workspace_read.panes() {
                 let pane_weak = pane.downgrade();
-                for item in pane.read(cx).items() {
-                    if let Some(editor) = item.downcast::<Editor>() {
+                // Only get the active item in each pane, not all items/tabs
+                if let Some(active_item) = pane.read(cx).active_item() {
+                    if let Some(editor) = active_item.downcast::<Editor>() {
                         all_editors.push((editor, Some(pane_weak.clone())));
                     }
                 }
