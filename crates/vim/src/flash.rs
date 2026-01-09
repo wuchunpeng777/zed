@@ -444,8 +444,14 @@ impl Vim {
 
         // Update flash state
         if let Some(flash_state) = &mut self.flash_state {
-            flash_state.matches = flash_matches;
+            flash_state.matches = flash_matches.clone();
             flash_state.editor_inlay_ids = editor_inlay_ids;
+        }
+
+        // If no matches found, exit flash mode
+        if flash_matches.is_empty() {
+            self.clear_flash(window, cx);
+            return;
         }
 
         self.show_flash_labels(window, cx);
