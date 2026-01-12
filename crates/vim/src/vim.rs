@@ -131,6 +131,12 @@ struct Flash {
     backwards: Option<bool>,
 }
 
+#[derive(Clone, Copy, Deserialize, JsonSchema, PartialEq, Action)]
+#[action(namespace = vim)]
+#[serde(deny_unknown_fields)]
+/// Confirms the default flash match (triggered by Enter key in flash mode).
+struct FlashConfirm;
+
 #[derive(Clone, Deserialize, JsonSchema, PartialEq, Action)]
 #[action(namespace = vim)]
 #[serde(deny_unknown_fields)]
@@ -738,6 +744,10 @@ impl Vim {
 
             Vim::action(editor, cx, |vim, action: &Flash, window, cx| {
                 vim.flash_search(action.backwards.unwrap_or(false), window, cx)
+            });
+
+            Vim::action(editor, cx, |vim, _: &FlashConfirm, window, cx| {
+                vim.flash_confirm(window, cx);
             });
 
             Vim::action(editor, cx, |vim, _: &PushAddSurrounds, window, cx| {

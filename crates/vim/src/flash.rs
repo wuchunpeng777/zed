@@ -24,6 +24,7 @@ const FLASH_LABELS: &str = "asdfghjklqwertyuiopzxcvbnm";
 const MAX_MATCHES: usize = 100;
 
 struct FlashHighlight;
+struct FlashDefaultHighlight;
 
 #[derive(Clone, Debug)]
 pub struct FlashMatch {
@@ -51,6 +52,8 @@ pub struct FlashState {
     pub editor_inlay_ids: Vec<(WeakEntity<Editor>, Vec<InlayId>)>,
     /// Buffer for multi-character label input
     pub label_input: String,
+    /// Index of the default match (first match after cursor, or last before cursor if none after)
+    pub default_match_index: Option<usize>,
 }
 
 impl FlashState {
@@ -63,7 +66,14 @@ impl FlashState {
             inlay_ids: Vec::new(),
             editor_inlay_ids: Vec::new(),
             label_input: String::new(),
+            default_match_index: None,
         }
+    }
+    
+    /// Get the default match (for Enter key jump)
+    pub fn default_match(&self) -> Option<FlashMatch> {
+        self.default_match_index
+            .and_then(|idx| self.matches.get(idx).cloned())
     }
 
     pub fn add_char(&mut self, c: char) {
@@ -200,6 +210,10 @@ impl Vim {
         let mut all_editor_matches: Vec<EditorMatches> = Vec::new();
         let pattern_byte_len = search_pattern.len() as u32;
         
+        // Store cursor position from current editor for default match calculation
+        let mut cursor_display_point: Option<DisplayPoint> = None;
+        let mut current_editor_weak: Option<WeakEntity<Editor>> = None;
+        
         // Process current editor first
         self.update_editor(cx, |vim, editor, cx| {
             // Remove old inlays first
@@ -210,6 +224,15 @@ impl Vim {
 
             let snapshot = editor.snapshot(window, cx);
             let display_snapshot = snapshot.display_snapshot.clone();
+
+            // Get cursor position for default match selection
+            let cursor_point = editor
+                .selections
+                .newest::<Point>(&display_snapshot)
+                .head()
+                .to_display_point(&display_snapshot);
+            cursor_display_point = Some(cursor_point);
+            current_editor_weak = Some(cx.entity().downgrade());
 
             // Get visible screen range using scroll position and visible line count
             let scroll_position = editor.scroll_position(cx);
@@ -373,14 +396,44 @@ impl Vim {
             })
             .collect();
 
+        // Calculate default match index (first match after cursor in current editor, or last before cursor)
+        let default_match_index = if let (Some(cursor_point), Some(current_editor)) = (cursor_display_point, &current_editor_weak) {
+            // Find first match after cursor in current editor
+            let mut first_after_cursor: Option<usize> = None;
+            let mut last_before_cursor: Option<usize> = None;
+            
+            for (i, flash_match) in flash_matches.iter().enumerate() {
+                // Check if this match is in the current editor
+                if let Some(ref match_editor) = flash_match.editor {
+                    if match_editor.upgrade().map(|e| e.entity_id()) 
+                        == current_editor.upgrade().map(|e| e.entity_id()) 
+                    {
+                        if flash_match.display_point > cursor_point {
+                            if first_after_cursor.is_none() {
+                                first_after_cursor = Some(i);
+                            }
+                        } else {
+                            last_before_cursor = Some(i);
+                        }
+                    }
+                }
+            }
+            
+            // Prefer first match after cursor, fall back to last match before cursor
+            first_after_cursor.or(last_before_cursor)
+        } else {
+            // No cursor info, use first match as default
+            if flash_matches.is_empty() { None } else { Some(0) }
+        };
+
         // Group matches by editor and create inlays/highlights
         let mut editor_inlay_ids: Vec<(WeakEntity<Editor>, Vec<InlayId>)> = Vec::new();
         let mut inlay_counter = 0usize;
         // Get label input length for prefix highlighting (0 during initial match display)
         let label_input_len = self.flash_state.as_ref().map(|s| s.label_input.len()).unwrap_or(0);
 
-        // Group matches by editor entity id along with their snapshots
-        let mut matches_by_editor: std::collections::HashMap<gpui::EntityId, (WeakEntity<Editor>, DisplaySnapshot, Vec<&FlashMatch>)> = 
+        // Group matches by editor entity id along with their snapshots, also track which is default
+        let mut matches_by_editor: std::collections::HashMap<gpui::EntityId, (WeakEntity<Editor>, DisplaySnapshot, Vec<(usize, &FlashMatch)>)> = 
             std::collections::HashMap::new();
         
         for (i, flash_match) in flash_matches.iter().enumerate() {
@@ -393,7 +446,7 @@ impl Vim {
                             let (_, _, _, ds) = &all_matches[i];
                             (editor.clone(), ds.clone(), Vec::new())
                         });
-                    entry.2.push(flash_match);
+                    entry.2.push((i, flash_match));
                 }
             }
         }
@@ -404,10 +457,11 @@ impl Vim {
                 editor.update(cx, |editor, cx| {
                     let buffer_snapshot = display_snapshot.buffer_snapshot();
                     
-                    // Create highlight ranges
-                    let ranges: Vec<Range<Anchor>> = matches
+                    // Create highlight ranges for non-default matches
+                    let normal_ranges: Vec<Range<Anchor>> = matches
                         .iter()
-                        .map(|m| {
+                        .filter(|(idx, _)| Some(*idx) != default_match_index)
+                        .map(|(_, m)| {
                             let start_point = m.buffer_point;
                             let end_point = Point::new(start_point.row, start_point.column + pattern_byte_len);
                             let start = buffer_snapshot.anchor_before(start_point);
@@ -417,15 +471,34 @@ impl Vim {
                         .collect();
 
                     editor.highlight_background::<FlashHighlight>(
-                        &ranges,
+                        &normal_ranges,
                         |_, colors| colors.colors().editor_document_highlight_write_background,
+                        cx,
+                    );
+                    
+                    // Create highlight range for default match with special color
+                    let default_ranges: Vec<Range<Anchor>> = matches
+                        .iter()
+                        .filter(|(idx, _)| Some(*idx) == default_match_index)
+                        .map(|(_, m)| {
+                            let start_point = m.buffer_point;
+                            let end_point = Point::new(start_point.row, start_point.column + pattern_byte_len);
+                            let start = buffer_snapshot.anchor_before(start_point);
+                            let end = buffer_snapshot.anchor_after(end_point);
+                            start..end
+                        })
+                        .collect();
+
+                    editor.highlight_background::<FlashDefaultHighlight>(
+                        &default_ranges,
+                        |_, colors| colors.players().local().selection,
                         cx,
                     );
 
                     // Create inlays with prefix highlighting support
                     let inlays: Vec<Inlay> = matches
                         .iter()
-                        .filter_map(|m| {
+                        .filter_map(|(_, m)| {
                             m.anchor.map(|anchor| {
                                 let inlay = Inlay::flash(inlay_counter, anchor, m.label.clone(), label_input_len);
                                 inlay_counter += 1;
@@ -446,6 +519,7 @@ impl Vim {
         if let Some(flash_state) = &mut self.flash_state {
             flash_state.matches = flash_matches.clone();
             flash_state.editor_inlay_ids = editor_inlay_ids;
+            flash_state.default_match_index = default_match_index;
         }
 
         // If no matches found, exit flash mode
@@ -645,6 +719,7 @@ impl Vim {
             if let Some(editor) = weak_editor.upgrade() {
                 editor.update(cx, |editor, cx| {
                     editor.clear_background_highlights::<FlashHighlight>(cx);
+                    editor.clear_background_highlights::<FlashDefaultHighlight>(cx);
                     if !inlay_ids.is_empty() {
                         editor.splice_inlays(&inlay_ids, vec![], cx);
                     }
@@ -655,6 +730,7 @@ impl Vim {
         // Also clear from current editor
         self.update_editor(cx, |_, editor, cx| {
             editor.clear_background_highlights::<FlashHighlight>(cx);
+            editor.clear_background_highlights::<FlashDefaultHighlight>(cx);
             if !inlay_ids.is_empty() {
                 editor.splice_inlays(&inlay_ids, vec![], cx);
             }
@@ -664,6 +740,21 @@ impl Vim {
 
     pub fn is_flash_active(&self) -> bool {
         self.flash_state.as_ref().is_some_and(|s| s.active)
+    }
+    
+    /// Jump to the default match (triggered by Enter key)
+    pub fn flash_confirm(&mut self, window: &mut Window, cx: &mut Context<Self>) -> bool {
+        let Some(flash_state) = &self.flash_state else {
+            return false;
+        };
+        
+        let Some(default_match) = flash_state.default_match() else {
+            return false;
+        };
+        
+        self.jump_to_flash_match(default_match, window, cx);
+        self.clear_flash(window, cx);
+        true
     }
 }
 
