@@ -476,7 +476,8 @@ impl Vim {
                         cx,
                     );
                     
-                    // Create highlight range for default match with special color
+                    // Create highlight range for default match with special color (like flash.nvim's FlashCurrent)
+                    // Use a more prominent color - the cursor color provides high visibility
                     let default_ranges: Vec<Range<Anchor>> = matches
                         .iter()
                         .filter(|(idx, _)| Some(*idx) == default_match_index)
@@ -489,9 +490,15 @@ impl Vim {
                         })
                         .collect();
 
+                    // FlashDefaultHighlight uses a fixed orange color for maximum visibility
                     editor.highlight_background::<FlashDefaultHighlight>(
                         &default_ranges,
-                        |_, colors| colors.players().local().selection,
+                        |_, _| gpui::Hsla {
+                            h: 30.0 / 360.0,
+                            s: 1.0,
+                            l: 0.5,
+                            a: 1.0,
+                        },
                         cx,
                     );
 
