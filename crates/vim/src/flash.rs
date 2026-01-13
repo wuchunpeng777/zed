@@ -8,12 +8,10 @@
 use crate::{Vim, VimSettings};
 use editor::{
     display_map::{DisplayRow, DisplaySnapshot, ToDisplayPoint},
-    inlays::Inlay,
-    Anchor, DisplayPoint, Editor, SelectionEffects, ToOffset, ToPoint,
+    Anchor, DisplayPoint, Editor, FlashLabel, SelectionEffects, ToOffset, ToPoint,
 };
 use gpui::{Context, Entity, WeakEntity, Window};
 use language::{Point, SelectionGoal};
-use project::InlayId;
 use settings::Settings;
 use std::ops::Range;
 use workspace::Pane;
@@ -48,9 +46,6 @@ pub struct FlashState {
     pub search_chars: String,
     pub matches: Vec<FlashMatch>,
     pub backwards: bool,
-    pub inlay_ids: Vec<InlayId>,
-    /// Inlay IDs per editor (for multi-pane support)
-    pub editor_inlay_ids: Vec<(WeakEntity<Editor>, Vec<InlayId>)>,
     /// Buffer for multi-character label input
     pub label_input: String,
     /// Index of the default match (first match after cursor, or last before cursor if none after)
@@ -64,8 +59,6 @@ impl FlashState {
             search_chars: String::new(),
             matches: Vec::new(),
             backwards,
-            inlay_ids: Vec::new(),
-            editor_inlay_ids: Vec::new(),
             label_input: String::new(),
             default_match_index: None,
         }
@@ -136,8 +129,8 @@ impl Vim {
             if flash_state.has_label_prefix(&test_label) {
                 // Store the partial label input and wait for more
                 flash_state.label_input = test_label;
-                // Refresh inlays to show the typed prefix as dimmed
-                self.refresh_flash_inlays(window, cx);
+                // Refresh flash labels to show the typed prefix as dimmed
+                self.refresh_flash_labels(window, cx);
                 self.sync_vim_settings(window, cx);
                 return true;
             }
@@ -168,20 +161,6 @@ impl Vim {
         }
 
         let backwards = flash_state.backwards;
-        
-        // Get old inlay IDs to remove from all editors
-        let old_inlay_ids = flash_state.inlay_ids.clone();
-        let old_editor_inlay_ids = flash_state.editor_inlay_ids.clone();
-
-        // Clear old inlays from other editors first
-        for (weak_editor, inlay_ids) in old_editor_inlay_ids {
-            if let Some(editor) = weak_editor.upgrade() {
-                editor.update(cx, |editor, cx| {
-                    editor.splice_inlays(&inlay_ids, vec![], cx);
-                    editor.clear_background_highlights::<FlashHighlight>(cx);
-                });
-            }
-        }
 
         // Collect only active/visible editors from workspace panes (not all tabs)
         let workspace = self.workspace(window);
@@ -216,13 +195,7 @@ impl Vim {
         let mut current_editor_weak: Option<WeakEntity<Editor>> = None;
         
         // Process current editor first
-        self.update_editor(cx, |vim, editor, cx| {
-            // Remove old inlays first
-            if !old_inlay_ids.is_empty() {
-                editor.splice_inlays(&old_inlay_ids, vec![], cx);
-            }
-            editor.clear_background_highlights::<FlashHighlight>(cx);
-
+        self.update_editor(cx, |_vim, editor, cx| {
             let snapshot = editor.snapshot(window, cx);
             let display_snapshot = snapshot.display_snapshot.clone();
 
@@ -256,11 +229,6 @@ impl Vim {
                 end_point,
                 &search_pattern,
             );
-
-            if let Some(state) = vim.flash_state.as_mut() {
-                state.inlay_ids.clear();
-                state.editor_inlay_ids.clear();
-            }
             
             all_editor_matches.push(EditorMatches {
                 editor: cx.entity().downgrade(),
@@ -427,9 +395,6 @@ impl Vim {
             if flash_matches.is_empty() { None } else { Some(0) }
         };
 
-        // Group matches by editor and create inlays/highlights
-        let mut editor_inlay_ids: Vec<(WeakEntity<Editor>, Vec<InlayId>)> = Vec::new();
-        let mut inlay_counter = 0usize;
         // Get label input length for prefix highlighting (0 during initial match display)
         let label_input_len = self.flash_state.as_ref().map(|s| s.label_input.len()).unwrap_or(0);
 
@@ -452,7 +417,7 @@ impl Vim {
             }
         }
 
-        // Apply highlights and inlays to each editor
+        // Apply highlights and flash labels to each editor
         for (_editor_id, (editor_weak, display_snapshot, matches)) in matches_by_editor {
             if let Some(editor) = editor_weak.upgrade() {
                 editor.update(cx, |editor, cx| {
@@ -507,22 +472,20 @@ impl Vim {
                         cx,
                     );
 
-                    // Create inlays with prefix highlighting support
-                    let inlays: Vec<Inlay> = matches
+                    // Create flash labels as overlays on matched text
+                    let flash_labels: Vec<FlashLabel> = matches
                         .iter()
-                        .filter_map(|(_, m)| {
-                            m.anchor.map(|anchor| {
-                                let inlay = Inlay::flash(inlay_counter, anchor, m.label.clone(), label_input_len);
-                                inlay_counter += 1;
-                                inlay
+                        .filter_map(|(idx, m)| {
+                            m.anchor.map(|anchor| FlashLabel {
+                                anchor,
+                                label: m.label.clone(),
+                                prefix_len: label_input_len,
+                                is_default: Some(*idx) == default_match_index,
                             })
                         })
                         .collect();
 
-                    let inlay_ids: Vec<InlayId> = inlays.iter().map(|inlay| inlay.id).collect();
-                    editor_inlay_ids.push((editor_weak.clone(), inlay_ids));
-                    
-                    editor.splice_inlays(&[], inlays, cx);
+                    editor.set_flash_labels(flash_labels, cx);
                 });
             }
         }
@@ -530,7 +493,6 @@ impl Vim {
         // Update flash state
         if let Some(flash_state) = &mut self.flash_state {
             flash_state.matches = flash_matches.clone();
-            flash_state.editor_inlay_ids = editor_inlay_ids;
             flash_state.default_match_index = default_match_index;
         }
 
@@ -544,66 +506,58 @@ impl Vim {
     }
 
     fn show_flash_labels(&mut self, _window: &mut Window, cx: &mut Context<Self>) {
-        // Labels are shown inline via inlays, no need for status bar display
+        // Labels are rendered as overlays by the editor
         cx.notify();
     }
 
-    /// Refresh flash inlays to update prefix highlighting when user types partial labels
-    fn refresh_flash_inlays(&mut self, _window: &mut Window, cx: &mut Context<Self>) {
+    /// Refresh flash labels to update prefix highlighting when user types partial labels
+    fn refresh_flash_labels(&mut self, _window: &mut Window, cx: &mut Context<Self>) {
         let Some(flash_state) = &self.flash_state else {
             return;
         };
 
         let label_input_len = flash_state.label_input.len();
         let matches = flash_state.matches.clone();
-        let old_editor_inlay_ids = flash_state.editor_inlay_ids.clone();
+        let default_match_index = flash_state.default_match_index;
 
-        // Remove old inlays and create new ones with updated prefix_len
-        let mut new_editor_inlay_ids: Vec<(WeakEntity<Editor>, Vec<InlayId>)> = Vec::new();
-        let mut inlay_counter = 0usize;
-
-        for (editor_weak, old_inlay_ids) in old_editor_inlay_ids {
-            if let Some(editor) = editor_weak.upgrade() {
-                // Get matches for this editor
-                let editor_id = editor.entity_id();
-                let editor_matches: Vec<&FlashMatch> = matches
-                    .iter()
-                    .filter(|m| {
-                        m.editor
-                            .as_ref()
-                            .and_then(|e| e.upgrade())
-                            .map(|e| e.entity_id() == editor_id)
-                            .unwrap_or(false)
-                    })
-                    .collect();
-
-                editor.update(cx, |editor, cx| {
-                    // Remove old inlays
-                    editor.splice_inlays(&old_inlay_ids, vec![], cx);
-
-                    // Create new inlays with updated prefix_len
-                    let inlays: Vec<Inlay> = editor_matches
-                        .iter()
-                        .filter_map(|m| {
-                            m.anchor.map(|anchor| {
-                                let inlay = Inlay::flash(inlay_counter, anchor, m.label.clone(), label_input_len);
-                                inlay_counter += 1;
-                                inlay
-                            })
-                        })
-                        .collect();
-
-                    let inlay_ids: Vec<InlayId> = inlays.iter().map(|inlay| inlay.id).collect();
-                    new_editor_inlay_ids.push((editor_weak.clone(), inlay_ids));
-
-                    editor.splice_inlays(&[], inlays, cx);
-                });
+        // Group matches by editor and update flash labels
+        let mut matches_by_editor: std::collections::HashMap<gpui::EntityId, Vec<(usize, &FlashMatch)>> = 
+            std::collections::HashMap::new();
+        
+        for (i, flash_match) in matches.iter().enumerate() {
+            if let Some(ref editor) = flash_match.editor {
+                if let Some(editor_entity) = editor.upgrade() {
+                    let editor_id = editor_entity.entity_id();
+                    matches_by_editor
+                        .entry(editor_id)
+                        .or_insert_with(Vec::new)
+                        .push((i, flash_match));
+                }
             }
         }
 
-        // Update flash state with new inlay IDs
-        if let Some(flash_state) = &mut self.flash_state {
-            flash_state.editor_inlay_ids = new_editor_inlay_ids;
+        for (_editor_id, editor_matches) in matches_by_editor {
+            if let Some((_, first_match)) = editor_matches.first() {
+                if let Some(ref editor_weak) = first_match.editor {
+                    if let Some(editor) = editor_weak.upgrade() {
+                        editor.update(cx, |editor, cx| {
+                            let flash_labels: Vec<FlashLabel> = editor_matches
+                                .iter()
+                                .filter_map(|(idx, m)| {
+                                    m.anchor.map(|anchor| FlashLabel {
+                                        anchor,
+                                        label: m.label.clone(),
+                                        prefix_len: label_input_len,
+                                        is_default: Some(*idx) == default_match_index,
+                                    })
+                                })
+                                .collect();
+
+                            editor.set_flash_labels(flash_labels, cx);
+                        });
+                    }
+                }
+            }
         }
 
         cx.notify();
@@ -620,20 +574,17 @@ impl Vim {
         let target_pane = flash_match.pane.clone();
         let is_visual = self.mode.is_visual();
 
-        // Clear all inlays from all editors first
+        // Clear flash labels from all editors
         if let Some(flash_state) = &self.flash_state {
-            for (weak_editor, inlay_ids) in &flash_state.editor_inlay_ids {
-                if let Some(editor) = weak_editor.upgrade() {
-                    editor.update(cx, |editor, cx| {
-                        editor.splice_inlays(inlay_ids, Vec::new(), cx);
-                    });
+            for flash_m in &flash_state.matches {
+                if let Some(ref weak_editor) = flash_m.editor {
+                    if let Some(editor) = weak_editor.upgrade() {
+                        editor.update(cx, |editor, cx| {
+                            editor.clear_flash_labels(cx);
+                        });
+                    }
                 }
             }
-        }
-
-        if let Some(state) = self.flash_state.as_mut() {
-            state.inlay_ids.clear();
-            state.editor_inlay_ids.clear();
         }
 
         // If jumping to another editor, activate its pane and item first
@@ -711,30 +662,28 @@ impl Vim {
     }
 
     pub fn clear_flash(&mut self, window: &mut Window, cx: &mut Context<Self>) {
-        // Get inlay IDs to remove before clearing state
-        let inlay_ids: Vec<InlayId> = self
+        // Get editors to clear before clearing state
+        let editors_to_clear: Vec<WeakEntity<Editor>> = self
             .flash_state
             .as_ref()
-            .map(|s| s.inlay_ids.clone())
-            .unwrap_or_default();
-        let editor_inlay_ids: Vec<(WeakEntity<Editor>, Vec<InlayId>)> = self
-            .flash_state
-            .as_ref()
-            .map(|s| s.editor_inlay_ids.clone())
+            .map(|s| {
+                s.matches
+                    .iter()
+                    .filter_map(|m| m.editor.clone())
+                    .collect()
+            })
             .unwrap_or_default();
 
         self.flash_state = None;
         self.status_label = None;
         
-        // Clear inlays from all editors
-        for (weak_editor, inlay_ids) in editor_inlay_ids {
+        // Clear flash labels and highlights from all editors
+        for weak_editor in editors_to_clear {
             if let Some(editor) = weak_editor.upgrade() {
                 editor.update(cx, |editor, cx| {
                     editor.clear_background_highlights::<FlashHighlight>(cx);
                     editor.clear_background_highlights::<FlashDefaultHighlight>(cx);
-                    if !inlay_ids.is_empty() {
-                        editor.splice_inlays(&inlay_ids, vec![], cx);
-                    }
+                    editor.clear_flash_labels(cx);
                 });
             }
         }
@@ -743,9 +692,7 @@ impl Vim {
         self.update_editor(cx, |_, editor, cx| {
             editor.clear_background_highlights::<FlashHighlight>(cx);
             editor.clear_background_highlights::<FlashDefaultHighlight>(cx);
-            if !inlay_ids.is_empty() {
-                editor.splice_inlays(&inlay_ids, vec![], cx);
-            }
+            editor.clear_flash_labels(cx);
         });
         self.sync_vim_settings(window, cx);
     }

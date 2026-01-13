@@ -1657,6 +1657,68 @@ impl EditorElement {
         cursors
     }
 
+    /// Layout flash labels for vim flash mode
+    fn layout_flash_labels(
+        &self,
+        position_map: &PositionMap,
+        content_origin: gpui::Point<Pixels>,
+        _window: &mut Window,
+        cx: &mut App,
+    ) -> Vec<FlashLabelLayout> {
+        let editor = self.editor.read(cx);
+        let flash_labels = editor.flash_labels();
+        
+        if flash_labels.is_empty() {
+            return Vec::new();
+        }
+
+        let snapshot = &position_map.snapshot;
+        let scroll_position = position_map.scroll_position;
+        let scroll_pixel_position = position_map.scroll_pixel_position;
+        let line_height = position_map.line_height;
+        let text_hitbox = &position_map.text_hitbox;
+
+        flash_labels
+            .iter()
+            .filter_map(|label| {
+                let display_point = label.anchor.to_display_point(&snapshot.display_snapshot);
+                
+                // Check if the label is in visible range
+                let row = display_point.row();
+                if row < position_map.visible_row_range.start || row >= position_map.visible_row_range.end {
+                    return None;
+                }
+
+                // Get the line layout for this row to calculate precise x position
+                let row_index = row.minus(position_map.visible_row_range.start) as usize;
+                if row_index >= position_map.line_layouts.len() {
+                    return None;
+                }
+                let line_layout = &position_map.line_layouts[row_index];
+                
+                // Calculate precise x position using line layout (same as cursor positioning)
+                let column = display_point.column() as usize;
+                let character_x = line_layout.x_for_index(column)
+                    + line_layout.alignment_offset(self.style.text.text_align, text_hitbox.size.width);
+                
+                let x: Pixels = character_x - scroll_pixel_position.x.into();
+                let y: Pixels = ((row.0 as f64 - scroll_position.y)
+                    * ScrollPixelOffset::from(line_height))
+                    .into();
+
+                Some(FlashLabelLayout {
+                    origin: point(
+                        content_origin.x + x,
+                        content_origin.y + y,
+                    ),
+                    label: label.label.clone(),
+                    prefix_len: label.prefix_len,
+                    is_default: label.is_default,
+                })
+            })
+            .collect()
+    }
+
     fn layout_visible_cursors(
         &self,
         snapshot: &EditorSnapshot,
@@ -6601,6 +6663,7 @@ impl EditorElement {
                 self.paint_lines(&invisible_display_ranges, layout, window, cx);
                 self.paint_redactions(layout, window);
                 self.paint_cursors(layout, window, cx);
+                self.paint_flash_labels(layout, window, cx);
                 self.paint_inline_diagnostics(layout, window, cx);
                 self.paint_inline_blame(layout, window, cx);
                 self.paint_inline_code_actions(layout, window, cx);
@@ -6861,6 +6924,77 @@ impl EditorElement {
         for cursor in &mut layout.visible_cursors {
             cursor.paint(layout.content_origin, window, cx);
         }
+    }
+
+    /// Paint flash labels for vim flash mode as overlays on matched text
+    fn paint_flash_labels(&mut self, layout: &mut EditorLayout, window: &mut Window, cx: &mut App) {
+        use gpui::{div, FontWeight, Styled};
+        use ui::{h_flex, prelude::*};
+
+        if layout.flash_labels.is_empty() {
+            return;
+        }
+
+        let line_height = layout.position_map.line_height;
+        let theme = cx.theme();
+        let cursor_color = theme.players().local().cursor;
+        
+        // Determine text color based on cursor brightness
+        let text_color = if cursor_color.l > 0.5 {
+            gpui::black()
+        } else {
+            gpui::white()
+        };
+        let dimmed_color = text_color.opacity(0.4);
+
+        window.paint_layer(layout.position_map.text_hitbox.bounds, |window| {
+            for flash_label in &layout.flash_labels {
+                let prefix: String = flash_label.label.chars().take(flash_label.prefix_len).collect();
+                let suffix: String = flash_label.label.chars().skip(flash_label.prefix_len).collect();
+
+                // Use different background for default match (the one Enter jumps to)
+                let bg_color = if flash_label.is_default {
+                    // Slightly brighter/more saturated for default match
+                    gpui::Hsla {
+                        h: cursor_color.h,
+                        s: cursor_color.s.min(1.0),
+                        l: (cursor_color.l + 0.1).min(0.9),
+                        a: cursor_color.a,
+                    }
+                } else {
+                    cursor_color
+                };
+
+                let mut element = h_flex()
+                    .bg(bg_color)
+                    .rounded_sm()
+                    .px(px(2.0))
+                    .font_weight(FontWeight::BOLD)
+                    .line_height(line_height);
+
+                // Add prefix (dimmed) if any
+                if !prefix.is_empty() {
+                    element = element.child(
+                        div()
+                            .text_color(dimmed_color)
+                            .child(prefix)
+                    );
+                }
+
+                // Add suffix (normal color)
+                if !suffix.is_empty() {
+                    element = element.child(
+                        div()
+                            .text_color(text_color)
+                            .child(suffix)
+                    );
+                }
+
+                let mut element = element.into_any_element();
+                element.prepaint_as_root(flash_label.origin, AvailableSpace::min_size(), window, cx);
+                element.paint(window, cx);
+            }
+        });
     }
 
     fn paint_scrollbars(&mut self, layout: &mut EditorLayout, window: &mut Window, cx: &mut App) {
@@ -10449,6 +10583,14 @@ impl Element for EditorElement {
                         editor.last_position_map = Some(position_map.clone())
                     });
 
+                    // Layout flash labels for vim flash mode
+                    let flash_labels = self.layout_flash_labels(
+                        &position_map,
+                        content_origin,
+                        window,
+                        cx,
+                    );
+
                     EditorLayout {
                         mode,
                         position_map,
@@ -10491,6 +10633,7 @@ impl Element for EditorElement {
                         expand_toggles,
                         text_align: self.style.text.text_align,
                         content_width: text_hitbox.size.width,
+                        flash_labels,
                     }
                 })
             })
@@ -10673,6 +10816,20 @@ pub struct EditorLayout {
     document_colors: Option<(DocumentColorsRenderMode, Vec<(Range<DisplayPoint>, Hsla)>)>,
     text_align: TextAlign,
     content_width: Pixels,
+    /// Flash labels for vim flash jump mode (rendered as overlays on matched text)
+    flash_labels: Vec<FlashLabelLayout>,
+}
+
+/// Layout information for a flash label
+struct FlashLabelLayout {
+    /// The position in pixels where the label should be rendered
+    origin: gpui::Point<Pixels>,
+    /// The label text
+    label: String,
+    /// Number of characters already typed (for dimmed prefix)
+    prefix_len: usize,
+    /// Whether this is the default match
+    is_default: bool,
 }
 
 struct StickyHeaders {

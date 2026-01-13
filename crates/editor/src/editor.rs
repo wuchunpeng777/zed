@@ -1221,6 +1221,21 @@ pub struct Editor {
     applicable_language_settings: HashMap<Option<LanguageName>, LanguageSettings>,
     accent_data: Option<AccentData>,
     fetched_tree_sitter_chunks: HashMap<ExcerptId, HashSet<Range<BufferRow>>>,
+    /// Flash labels for vim flash jump mode (overlay labels that cover matched text)
+    flash_labels: Vec<FlashLabel>,
+}
+
+/// A flash label for vim flash jump mode
+#[derive(Clone, Debug)]
+pub struct FlashLabel {
+    /// The anchor position where the label should be displayed
+    pub anchor: Anchor,
+    /// The label text (e.g., "a", "ab")
+    pub label: String,
+    /// Number of characters already typed (for dimmed prefix)
+    pub prefix_len: usize,
+    /// Whether this is the default match (highlighted differently)
+    pub is_default: bool,
 }
 
 #[derive(Debug, PartialEq)]
@@ -2413,6 +2428,7 @@ impl Editor {
             accent_data: None,
             fetched_tree_sitter_chunks: HashMap::default(),
             number_deleted_lines: false,
+            flash_labels: Vec::new(),
         };
 
         if is_minimap {
@@ -21564,6 +21580,25 @@ impl Editor {
             cx.notify();
         }
         Some(text_highlights)
+    }
+
+    /// Set flash labels for vim flash jump mode (overlay labels that cover matched text)
+    pub fn set_flash_labels(&mut self, labels: Vec<FlashLabel>, cx: &mut Context<Self>) {
+        self.flash_labels = labels;
+        cx.notify();
+    }
+
+    /// Clear all flash labels
+    pub fn clear_flash_labels(&mut self, cx: &mut Context<Self>) {
+        if !self.flash_labels.is_empty() {
+            self.flash_labels.clear();
+            cx.notify();
+        }
+    }
+
+    /// Get current flash labels
+    pub fn flash_labels(&self) -> &[FlashLabel] {
+        &self.flash_labels
     }
 
     pub fn highlight_gutter<T: 'static>(
