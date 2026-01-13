@@ -1236,6 +1236,8 @@ pub struct FlashLabel {
     pub prefix_len: usize,
     /// Whether this is the default match (highlighted differently)
     pub is_default: bool,
+    /// Custom background color for this label (used for default match)
+    pub background_color: Option<gpui::Hsla>,
 }
 
 #[derive(Debug, PartialEq)]

@@ -1713,7 +1713,7 @@ impl EditorElement {
                     ),
                     label: label.label.clone(),
                     prefix_len: label.prefix_len,
-                    is_default: label.is_default,
+                    background_color: label.background_color,
                 })
             })
             .collect()
@@ -6938,32 +6938,22 @@ impl EditorElement {
         let line_height = layout.position_map.line_height;
         let theme = cx.theme();
         let cursor_color = theme.players().local().cursor;
-        
-        // Determine text color based on cursor brightness
-        let text_color = if cursor_color.l > 0.5 {
-            gpui::black()
-        } else {
-            gpui::white()
-        };
-        let dimmed_color = text_color.opacity(0.4);
 
         window.paint_layer(layout.position_map.text_hitbox.bounds, |window| {
             for flash_label in &layout.flash_labels {
                 let prefix: String = flash_label.label.chars().take(flash_label.prefix_len).collect();
                 let suffix: String = flash_label.label.chars().skip(flash_label.prefix_len).collect();
 
-                // Use different background for default match (the one Enter jumps to)
-                let bg_color = if flash_label.is_default {
-                    // Slightly brighter/more saturated for default match
-                    gpui::Hsla {
-                        h: cursor_color.h,
-                        s: cursor_color.s.min(1.0),
-                        l: (cursor_color.l + 0.1).min(0.9),
-                        a: cursor_color.a,
-                    }
+                // Use custom background color if provided (for default match), otherwise use cursor color
+                let bg_color = flash_label.background_color.unwrap_or(cursor_color);
+
+                // Determine text color based on background brightness
+                let text_color = if bg_color.l > 0.5 {
+                    gpui::black()
                 } else {
-                    cursor_color
+                    gpui::white()
                 };
+                let dimmed_color = text_color.opacity(0.4);
 
                 let mut element = h_flex()
                     .bg(bg_color)
@@ -10828,8 +10818,8 @@ struct FlashLabelLayout {
     label: String,
     /// Number of characters already typed (for dimmed prefix)
     prefix_len: usize,
-    /// Whether this is the default match
-    is_default: bool,
+    /// Custom background color (used for default match)
+    background_color: Option<gpui::Hsla>,
 }
 
 struct StickyHeaders {

@@ -476,11 +476,13 @@ impl Vim {
                     let flash_labels: Vec<FlashLabel> = matches
                         .iter()
                         .filter_map(|(idx, m)| {
+                            let is_default = Some(*idx) == default_match_index;
                             m.anchor.map(|anchor| FlashLabel {
                                 anchor,
                                 label: m.label.clone(),
                                 prefix_len: label_input_len,
-                                is_default: Some(*idx) == default_match_index,
+                                is_default,
+                                background_color: if is_default { Some(default_color) } else { None },
                             })
                         })
                         .collect();
@@ -520,6 +522,17 @@ impl Vim {
         let matches = flash_state.matches.clone();
         let default_match_index = flash_state.default_match_index;
 
+        // Get the default match background color from settings
+        let default_color = VimSettings::get_global(cx)
+            .flash
+            .default_match_background
+            .unwrap_or(gpui::Hsla {
+                h: 30.0 / 360.0,
+                s: 1.0,
+                l: 0.5,
+                a: 1.0,
+            });
+
         // Group matches by editor and update flash labels
         let mut matches_by_editor: std::collections::HashMap<gpui::EntityId, Vec<(usize, &FlashMatch)>> = 
             std::collections::HashMap::new();
@@ -544,11 +557,13 @@ impl Vim {
                             let flash_labels: Vec<FlashLabel> = editor_matches
                                 .iter()
                                 .filter_map(|(idx, m)| {
+                                    let is_default = Some(*idx) == default_match_index;
                                     m.anchor.map(|anchor| FlashLabel {
                                         anchor,
                                         label: m.label.clone(),
                                         prefix_len: label_input_len,
-                                        is_default: Some(*idx) == default_match_index,
+                                        is_default,
+                                        background_color: if is_default { Some(default_color) } else { None },
                                     })
                                 })
                                 .collect();
