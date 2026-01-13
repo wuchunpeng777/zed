@@ -2003,6 +2003,14 @@ struct VimSettings {
     pub custom_digraphs: HashMap<String, Arc<str>>,
     pub highlight_on_yank_duration: u64,
     pub cursor_shape: CursorShapeSettings,
+    pub flash: FlashSettings,
+}
+
+/// Settings for flash jump navigation.
+#[derive(Clone, Debug, Default)]
+pub struct FlashSettings {
+    /// Background color for the default flash match.
+    pub default_match_background: Option<gpui::Hsla>,
 }
 
 /// The settings for cursor shape.
@@ -2057,6 +2065,11 @@ impl Settings for VimSettings {
             custom_digraphs: vim.custom_digraphs.unwrap(),
             highlight_on_yank_duration: vim.highlight_on_yank_duration.unwrap(),
             cursor_shape: vim.cursor_shape.unwrap().into(),
+            flash: vim.flash.map(|f| FlashSettings {
+                default_match_background: f.default_match_background.and_then(|s| {
+                    gpui::Rgba::try_from(s.as_str()).ok().map(gpui::Hsla::from)
+                }),
+            }).unwrap_or_default(),
         }
     }
 }

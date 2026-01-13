@@ -685,6 +685,18 @@ pub struct VimSettingsContent {
     pub custom_digraphs: Option<HashMap<String, Arc<str>>>,
     pub highlight_on_yank_duration: Option<u64>,
     pub cursor_shape: Option<CursorShapeSettings>,
+    /// Settings for flash jump navigation.
+    pub flash: Option<FlashSettingsContent>,
+}
+
+/// Settings for flash jump navigation (flash.nvim-like feature).
+#[with_fallible_options]
+#[derive(Clone, Default, Serialize, Deserialize, PartialEq, Debug, JsonSchema, MergeFrom)]
+pub struct FlashSettingsContent {
+    /// Background color for the default flash match (the one that Enter key jumps to).
+    /// Accepts hex color values like "#ff6600" or "ff6600".
+    /// Default: "#ff8000" (orange)
+    pub default_match_background: Option<String>,
 }
 
 #[derive(Copy, Clone, Default, Serialize, Deserialize, JsonSchema, MergeFrom, PartialEq, Debug)]

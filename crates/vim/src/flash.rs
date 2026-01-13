@@ -5,7 +5,7 @@
 //! 2. See jump labels at all matching positions
 //! 3. Press a label key to jump directly to that position
 
-use crate::Vim;
+use crate::{Vim, VimSettings};
 use editor::{
     display_map::{DisplayRow, DisplaySnapshot, ToDisplayPoint},
     inlays::Inlay,
@@ -14,6 +14,7 @@ use editor::{
 use gpui::{Context, Entity, WeakEntity, Window};
 use language::{Point, SelectionGoal};
 use project::InlayId;
+use settings::Settings;
 use std::ops::Range;
 use workspace::Pane;
 
@@ -490,15 +491,19 @@ impl Vim {
                         })
                         .collect();
 
-                    // FlashDefaultHighlight uses a fixed orange color for maximum visibility
-                    editor.highlight_background::<FlashDefaultHighlight>(
-                        &default_ranges,
-                        |_, _| gpui::Hsla {
+                    // FlashDefaultHighlight uses configurable color (defaults to orange for maximum visibility)
+                    let default_color = VimSettings::get_global(cx)
+                        .flash
+                        .default_match_background
+                        .unwrap_or(gpui::Hsla {
                             h: 30.0 / 360.0,
                             s: 1.0,
                             l: 0.5,
                             a: 1.0,
-                        },
+                        });
+                    editor.highlight_background::<FlashDefaultHighlight>(
+                        &default_ranges,
+                        move |_, _| default_color,
                         cx,
                     );
 
